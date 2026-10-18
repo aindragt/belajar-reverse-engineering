@@ -9,7 +9,7 @@ int main() {
     cout << "Masukkan token: ";
     cin >> token;
 
-    if (token == "recoon-1337") {
+    if (token == "indra-pramudya-123") {
         cout << "Selamat menikmati aplikasi kami!" << endl;
     } else {
         cout << "Token ditolak!" << endl;

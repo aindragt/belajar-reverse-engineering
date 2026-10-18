@@ -1,6 +1,6 @@
-# Belajar Reverse Engineering: Bypass Cek Token dengan Patch 1 Byte
+# Belajar Reverse Engineering: Bypass Cek Token dengan x64dbg
 
-Latihan dasar reverse engineering di Windows (x86-64). Kita membuat program kecil yang meminta token, lalu "meng-crack"-nya dengan **mengubah satu byte** di file `.exe` agar token apa pun diterima.
+Latihan dasar reverse engineering di Windows (x86-64). Kita membuat program kecil yang meminta token, lalu memakai **x64dbg** untuk mengubah alur logikanya supaya token apa pun diterima. Caranya cukup dengan **mengubah satu byte** di file `.exe`.
 
 > ⚠️ Untuk tujuan edukasi saja. Praktikkan hanya pada program milik sendiri.
 
@@ -10,12 +10,12 @@ Latihan dasar reverse engineering di Windows (x86-64). Kita membuat program keci
 |------|------------|
 | `aplikasi.cpp` | Source code program pengecek token |
 | `aplikasi.exe` | Hasil compile asli (hanya menerima token yang benar) |
-| `cracked.exe`  | Versi yang sudah di-patch (menerima token apa pun) |
+| `cracked.exe`  | Versi yang sudah di-patch lewat x64dbg (menerima token apa pun) |
 
 ## 1. Program Target
 
 ```cpp
-if (token == "recoon-1337") {
+if (token == "indra-pramudya-123") {
     cout << "Selamat menikmati aplikasi kami!" << endl;
 } else {
     cout << "Token ditolak!" << endl;
@@ -28,89 +28,85 @@ Compile (MSYS2 / MinGW-w64, g++):
 g++ aplikasi.cpp -o aplikasi.exe
 ```
 
-## 2. Analisis: Cari Titik Pengecekan
+## 2. Patch dengan x64dbg
 
-Disassemble dengan `objdump`:
+1. Buka `aplikasi.exe` di **x64dbg** (versi 64-bit), lalu tekan `F9` sampai program berhenti di entry point/berjalan.
+2. Cari string: klik kanan di jendela CPU → **Search for → Current Module → String references**.
+   Cari `"Token ditolak!"` atau `"Selamat menikmati aplikasi kami!"`, lalu double-click untuk lompat ke kodenya.
+3. Sedikit di atasnya akan terlihat pola pengecekan token:
 
-```bash
-objdump -d -M intel aplikasi.exe
-```
+   ```asm
+   call  operator==(string, const char*)  ; bandingkan input dengan token asli
+   test  al, al                           ; hasil == 0 (token salah)?
+   je    <alamat "Token ditolak!">        ; 74 2A -> kalau salah, lompat ke cabang gagal
+   lea   rdx, ["Selamat menikmati..."]    ; kalau benar, lanjut ke cabang sukses
+   ```
 
-Di fungsi `main` terlihat bagian ini:
+4. Pilih baris `je`, tekan `Space` (Assemble), lalu ubah tujuan lompatan ke **alamat instruksi tepat di bawahnya** (baris `lea rdx, ...`). Byte-nya berubah dari `74 2A` menjadi `74 00`.
+5. Simpan: **File → Patch file** (`Ctrl+P`) → **Patch File** → simpan sebagai `cracked.exe`.
 
-```asm
-140001523:  e8 f8 10 00 00   call  operator==(string, const char*)  ; bandingkan token
-140001528:  84 c0            test  al, al                            ; hasil == 0 (salah)?
-14000152a:  74 2a            je    140001556                         ; kalau salah -> lompat ke "Token ditolak!"
-14000152c:  ...                                                      ; kalau benar -> "Selamat menikmati..."
-```
+> 💡 x64dbg biasanya menampilkan alamat seperti `00007FF6xxxx152A` karena ASLR, jadi base address-nya bisa berbeda setiap kali dijalankan. Yang tetap sama adalah **RVA `0x152A`** (offset dari base image).
 
-Logikanya:
+## 3. Kenapa Ini Berhasil?
+
 - `operator==` mengembalikan `1` (benar) atau `0` (salah) di register `al`.
-- `test al, al` + `je` → **jika hasilnya 0, lompat** ke cabang "Token ditolak!".
-- Jika tidak lompat, eksekusi lanjut ke cabang "Selamat menikmati...".
-
-Jadi kunci seluruh pengecekan ada di **satu instruksi lompat bersyarat**.
-
-## 3. Patch
-
-Instruksi `74 2a` artinya `je +0x2a` (lompat 0x2A byte ke depan). Kalau offset-nya diubah jadi `00`, lompatannya mendarat tepat di instruksi berikutnya — artinya **lompat atau tidak, hasilnya sama**: masuk ke cabang sukses.
+- `test al, al` + `je` artinya: **jika hasilnya 0, lompat** ke cabang "Token ditolak!".
+- `74 XX` = `je` dengan jarak lompat `XX` byte dari instruksi berikutnya. Jika `XX = 00`, tujuan lompatannya adalah instruksi berikutnya itu sendiri. Jadi **lompat atau tidak, hasilnya sama**: program masuk ke cabang sukses.
 
 | | Byte | Instruksi |
 |---|---|---|
-| Sebelum | `74 2A` | `je 140001556` (ke "Token ditolak!") |
-| Sesudah | `74 00` | `je 14000152c` (ke instruksi berikutnya = sukses) |
+| Sebelum | `74 2A` | `je +0x2A` → ke "Token ditolak!" |
+| Sesudah | `74 00` | `je +0x00` → ke instruksi berikutnya (sukses) |
 
-Lokasi di file: **offset `0x92B`** (byte `2A` → `00`).
+Verifikasi hanya 1 byte yang berubah:
 
-Cara menghitung offset file dari alamat virtual (lihat `objdump -h aplikasi.exe`):
+```bash
+cmp -l aplikasi.exe cracked.exe
+# 2348  52   0   -> file offset 0x92B (posisi 1-based, nilai oktal: 052 = 0x2A -> 0x00)
+```
+
+Menghitung file offset dari RVA (lihat `objdump -h aplikasi.exe`):
 
 ```
-file_offset = VA - ImageBase - .text VMA + .text FileOffset
-            = 0x14000152B - 0x140001000 + 0x400
+file_offset = RVA - .text VMA(RVA) + .text FileOffset
+            = 0x152B - 0x1000 + 0x400
             = 0x92B
 ```
 
-Patch bisa dilakukan dengan hex editor (HxD, dll.), atau lewat terminal:
+Tanpa x64dbg, patch yang sama bisa dilakukan dengan hex editor (HxD, dll.) atau lewat terminal:
 
 ```bash
 cp aplikasi.exe cracked.exe
 printf '\x00' | dd of=cracked.exe bs=1 seek=$((0x92B)) conv=notrunc
 ```
 
-Verifikasi hanya 1 byte yang berubah:
-
-```bash
-cmp -l aplikasi.exe cracked.exe
-# 2348  52   0   (posisi 1-based, nilai oktal: 052 = 0x2A -> 0x00)
-```
-
 ## 4. Hasil
 
 ```
 > aplikasi.exe
-Masukkan token: asal
+Masukkan token: test
 Token ditolak!
 
 > cracked.exe
-Masukkan token: asal
+Masukkan token: test
 Selamat menikmati aplikasi kami!
 ```
 
 ## Alternatif Patch Lain
 
-Ada beberapa cara lain untuk mencapai hasil yang sama:
-- Ganti `74 2a` dengan `90 90` (`nop nop`) — hapus lompatannya sama sekali.
-- Ganti `74` (`je`) dengan `75` (`jne`) — logika terbalik: token salah diterima, token benar justru ditolak.
+- Ganti `je` dengan dua `nop` (`90 90`): klik kanan → **Binary → Fill with NOPs**. Lompatannya hilang sama sekali.
+- Ganti `je` (`74`) dengan `jne` (`75`): logikanya terbalik, token salah diterima tapi token benar justru ditolak.
+- Tanpa patch file: pasang breakpoint (`F2`) di `je`, lalu saat berhenti ubah flag **ZF** menjadi `0` di panel register. Ini hanya berlaku selama sesi debugging.
 
 ## Pelajaran
 
 - Pengecekan `if` di source code berubah menjadi pasangan `cmp/test` + **conditional jump** di assembly. Itulah target utama saat cracking sederhana.
+- String references adalah titik awal tercepat untuk menemukan logika penting di dalam program.
 - Validasi yang sepenuhnya dilakukan di sisi klien bisa di-bypass dengan mudah.
-- Token `"recoon-1337"` juga tersimpan polos di binary (cek dengan `strings aplikasi.exe`) — hardcoded secret bukan rahasia.
+- Token `"indra-pramudya-123"` tersimpan polos di binary (cek dengan `strings aplikasi.exe` atau String references di x64dbg). Hardcoded secret bukan rahasia.
 
 ## Tools yang Dipakai
 
-- **g++** (MSYS2 UCRT64) — compile
-- **objdump** — disassembly & info section
-- **xxd / cmp / dd** — lihat, bandingkan, dan patch byte
+- **x64dbg**: debugging, analisis, dan patch
+- **g++** (MSYS2 UCRT64): compile
+- **objdump / cmp**: verifikasi disassembly dan byte yang berubah
